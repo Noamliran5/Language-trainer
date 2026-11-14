@@ -27,7 +27,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>מאמן שפות</string>
   <key>CFBundleDisplayName</key><string>מאמן שפות</string>
-  <key>CFBundleIdentifier</key><string>local.spanish-trainer.launcher</string>
+  <key>CFBundleIdentifier</key><string>local.language-trainer.launcher</string>
   <key>CFBundleExecutable</key><string>launcher</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -41,7 +41,7 @@ cat > "$APP/Contents/Resources/launch.sh" <<LAUNCHER
 #!/bin/bash
 PROJECT="$PROJECT"
 URL="http://127.0.0.1:8124"
-LOG="\$HOME/Library/Logs/spanish-trainer.log"
+LOG="\$HOME/Library/Logs/language-trainer.log"
 
 if ! curl -s -o /dev/null "\$URL"; then
   nohup "\$PROJECT/run.sh" > "\$LOG" 2>&1 &
