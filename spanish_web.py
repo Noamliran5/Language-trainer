@@ -3,6 +3,8 @@
 
 import re
 import random
+import difflib
+import unicodedata
 from flask import Flask, jsonify, request, session, render_template_string, redirect, url_for
 
 app = Flask(__name__)
@@ -854,24 +856,126 @@ LANG_META = {
 }
 
 
-def strip_punct(text):
-    return re.sub(r'[?!.,،؟¡¿]', '', text).strip()
+# ── Answer checking ────────────────────────────────────────────────────────────
+
+PUNCT_RE = re.compile(r'[?!.,;:"\'()\[\]״׳\-–—…،؟¡¿]')
+NIQQUD_RE = re.compile(r'[֑-ׇ]')
+FINAL_TO_NORMAL = str.maketrans("ךםןףץ", "כמנפצ")
+
+# Words the user may write instead of the word in the stored answer
+# (mostly second-person / gender forms that the rules below don't cover).
+WORD_ALTERNATIVES = {
+    "אתה": {"את"},
+    "בן": {"בת"},
+    "זה": {"זו", "זאת"},
+    "זו": {"זה", "זאת"},
+    "מאוד": {"מאד"},
+    "אמא": {"אימא"},
+}
+
+TYPO_MIN_LEN = 4      # shorter words must be spelled exactly
+TYPO_MIN_RATIO = 0.8  # similarity needed to count a word as a typo
+
 
 def normalize(text):
-    return strip_punct(text).lower()
+    text = unicodedata.normalize("NFC", text)
+    text = NIQQUD_RE.sub("", text)
+    text = PUNCT_RE.sub(" ", text)
+    return " ".join(text.lower().split())
 
-def find_issues(user_input, correct):
-    u = user_input.strip().split()
-    c = correct.strip().split()
+
+def tokenize(text):
+    return normalize(text).split()
+
+
+def _base(word):
+    """Word with Hebrew final letters replaced by their regular form."""
+    return word.translate(FINAL_TO_NORMAL)
+
+
+def gender_variants(word):
+    """Feminine / second-person forms of a masculine Hebrew word.
+    e.g. רעב→רעבה, מצטער→מצטערת, צריך→צריכה, סטודנט→סטודנטית, דבר→דברי."""
+    b = _base(word)
+    variants = {b + "ה", b + "ת", b + "ית", b + "י"}
+    if word.endswith("ה"):
+        variants.add(word[:-1] + "ת")
+    return variants
+
+
+def match_word(user_word, correct_word):
+    """How a user word relates to the expected word:
+    'exact', 'variant' (accepted alternative form), 'typo', or None."""
+    if user_word == correct_word or _base(user_word) == _base(correct_word):
+        return "exact"
+    if user_word in WORD_ALTERNATIVES.get(correct_word, ()) or \
+       _base(user_word) in gender_variants(correct_word):
+        return "variant"
+    if min(len(user_word), len(correct_word)) >= TYPO_MIN_LEN and \
+       difflib.SequenceMatcher(None, user_word, correct_word).ratio() >= TYPO_MIN_RATIO:
+        return "typo"
+    return None
+
+
+_RANK = {"exact": 0, "variant": 1, "typo": 2}
+
+
+def _canonicalize(user_tokens, correct_tokens):
+    """Map each user word to the expected word it matches (if any), so the
+    sequences can be aligned. Returns (canonical tokens, match kinds)."""
+    canon, kinds = [], []
+    for u in user_tokens:
+        best, best_kind = None, None
+        for c in correct_tokens:
+            kind = match_word(u, c)
+            if kind and (best_kind is None or _RANK[kind] < _RANK[best_kind]):
+                best, best_kind = c, kind
+        canon.append(best if best else u)
+        kinds.append(best_kind)
+    return canon, kinds
+
+
+def check_answer(user_input, correct):
+    """Compare a user's translation with the expected one.
+
+    Returns {"correct": bool, "issues": [...], "notes": [...]}.
+    issues explain why the answer was rejected; notes are small remarks
+    (typos, word order) on an answer that was accepted."""
+    user_tokens = tokenize(user_input)
+    correct_tokens = tokenize(correct)
+    canon, kinds = _canonicalize(user_tokens, correct_tokens)
+
+    typo_notes = [
+        f"שים לב לכתיב: «{u}» → «{c}»"
+        for u, c, k in zip(user_tokens, canon, kinds) if k == "typo"
+    ]
+
+    if canon == correct_tokens:
+        return {"correct": True, "issues": [], "notes": typo_notes}
+
+    # Same words in a different order — Hebrew is flexible about this.
+    if sorted(canon) == sorted(correct_tokens):
+        return {"correct": True, "issues": [],
+                "notes": typo_notes + [f"סדר המילים המקובל: «{correct}»"]}
+
     issues = []
-    for i in range(max(len(u), len(c))):
-        if i >= len(u):
-            issues.append(f"חסרה המילה: «{c[i]}»")
-        elif i >= len(c):
-            issues.append(f"מילה מיותרת: «{u[i]}»")
-        elif normalize(u[i]) != normalize(c[i]):
-            issues.append(f"«{u[i]}» => צריך להיות «{c[i]}»")
-    return issues
+    sm = difflib.SequenceMatcher(None, canon, correct_tokens, autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        got = user_tokens[i1:i2]
+        want = correct_tokens[j1:j2]
+        if op == "insert":
+            label = "חסרה המילה" if len(want) == 1 else "חסרות המילים"
+            issues.append(f"{label}: «{' '.join(want)}»")
+        elif op == "delete":
+            label = "מילה מיותרת" if len(got) == 1 else "מילים מיותרות"
+            issues.append(f"{label}: «{' '.join(got)}»")
+        elif len(got) == len(want):
+            issues.extend(f"«{g}» → צריך להיות «{w}»" for g, w in zip(got, want))
+        else:
+            issues.append(f"«{' '.join(got)}» → צריך להיות «{' '.join(want)}»")
+    return {"correct": False, "issues": issues, "notes": []}
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -888,7 +992,7 @@ def select_lang(lang):
     session.clear()
     session["lang"] = lang
     session["used"] = []
-    session["stats"] = {"first_try": 0, "corrected": 0, "words": 0}
+    session["stats"] = {"first_try": 0, "corrected": 0, "revealed": 0, "words": 0}
     session["attempts"] = 0
     session["current"] = None
     return redirect(url_for("train"))
@@ -930,26 +1034,38 @@ def check():
     session["attempts"] = session.get("attempts", 0) + 1
     attempts = session["attempts"]
 
-    if normalize(user_answer) == normalize(hebrew):
-        stats = session.get("stats", {"first_try": 0, "corrected": 0, "words": 0})
-        word_count = len(hebrew.split())
-        stats["words"] += word_count
-        if attempts == 1:
-            stats["first_try"] += 1
-            first_try = True
-        else:
-            stats["corrected"] += 1
-            first_try = False
+    result = check_answer(user_answer, hebrew)
+    if result["correct"]:
+        stats = get_session_stats()
+        stats["words"] += len(hebrew.split())
+        first_try = attempts == 1
+        stats["first_try" if first_try else "corrected"] += 1
         session["stats"] = stats
         session["current"] = None
-        return jsonify({"correct": True, "first_try": first_try, "attempts": attempts, "hebrew": hebrew})
-    else:
-        issues = find_issues(user_answer, hebrew)
-        return jsonify({"correct": False, "issues": issues, "attempts": attempts})
+        return jsonify({"correct": True, "first_try": first_try, "attempts": attempts,
+                        "hebrew": hebrew, "notes": result["notes"]})
+    return jsonify({"correct": False, "issues": result["issues"], "attempts": attempts})
+
+@app.route("/api/reveal", methods=["POST"])
+def reveal():
+    lang = session.get("lang", "spanish")
+    idx = session.get("current")
+    if idx is None:
+        return jsonify({"error": "no sentence"}), 400
+    stats = get_session_stats()
+    stats["revealed"] += 1
+    session["stats"] = stats
+    session["current"] = None
+    return jsonify({"hebrew": SENTENCES[lang][idx][1]})
+
+def get_session_stats():
+    stats = {"first_try": 0, "corrected": 0, "revealed": 0, "words": 0}
+    stats.update(session.get("stats", {}))
+    return stats
 
 @app.route("/api/stats")
 def get_stats():
-    return jsonify(session.get("stats", {"first_try": 0, "corrected": 0, "words": 0}))
+    return jsonify(get_session_stats())
 
 @app.route("/api/reset")
 def reset():
@@ -1115,7 +1231,19 @@ button:disabled{background:#555;cursor:default}
   border:1px solid rgba(50,200,100,.3);color:#70e090;
   text-align:center;font-size:1.05rem;
 }
+.feedback.revealed{
+  display:block;background:rgba(96,176,255,.1);
+  border:1px solid rgba(96,176,255,.3);color:#a0ccff;
+  text-align:center;font-size:1.05rem;
+}
 .issue{display:block}
+.note{display:block;font-size:.85rem;color:#c0d890;margin-top:4px}
+.stat.purple span{color:#c090ff}
+.btn-reveal{
+  display:block;margin:0 auto 14px;padding:8px 16px;font-size:.82rem;font-weight:600;
+  background:transparent;color:#999;border:1px solid rgba(255,255,255,.15);
+}
+.btn-reveal:hover{background:rgba(255,255,255,.07);color:#fff}
 
 .bottom-row{display:flex;gap:10px;justify-content:center;margin-top:4px}
 .btn-next{background:#1a3a6a;border:1px solid rgba(255,255,255,.15);display:none}
@@ -1155,6 +1283,7 @@ button:disabled{background:#555;cursor:default}
   <div class="stats-bar">
     <div class="stat green"><span id="s-first">0</span>צדקת מהניסיון הראשון</div>
     <div class="stat yellow"><span id="s-corr">0</span>תיקנת</div>
+    <div class="stat purple"><span id="s-rev">0</span>הצצת בתשובה</div>
     <div class="stat blue"><span id="s-words">0</span>מילים</div>
   </div>
 
@@ -1168,6 +1297,7 @@ button:disabled{background:#555;cursor:default}
   </div>
 
   <div class="feedback" id="feedback"></div>
+  <button class="btn-reveal" id="btn-reveal" onclick="revealAnswer()">לא יודע – הראה תשובה</button>
 
   <div class="bottom-row">
     <button class="btn-next" id="btn-next" onclick="nextSentence()">משפט הבא &larr;</button>
@@ -1181,6 +1311,7 @@ button:disabled{background:#555;cursor:default}
     <div class="summary-row"><span>משפטים שענית עליהם</span><span class="val" id="sum-total">0</span></div>
     <div class="summary-row"><span>צדקת מהניסיון הראשון</span><span class="val" id="sum-first">0</span></div>
     <div class="summary-row"><span>טעית ותיקנת</span><span class="val" id="sum-corr">0</span></div>
+    <div class="summary-row"><span>הצצת בתשובה</span><span class="val" id="sum-rev">0</span></div>
     <div class="summary-row"><span>סה"כ מילים</span><span class="val" id="sum-words">0</span></div>
     <button class="btn-restart" onclick="restart()">התחל מחדש</button>
     <button class="btn-change" onclick="window.location='/'">החלף שפה</button>
@@ -1189,27 +1320,54 @@ button:disabled{background:#555;cursor:default}
 
 <script>
 let solved = false;
+const $ = id => document.getElementById(id);
+
+// Build an element with text content (never innerHTML for user/server text).
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function showFeedback(kind, title, lines, lineClass) {
+  const fb = $('feedback');
+  fb.className = 'feedback ' + kind;
+  fb.replaceChildren(el('strong', '', title));
+  (lines || []).forEach(l => fb.appendChild(el('span', lineClass || 'issue', l)));
+}
+
+function finishSentence() {
+  solved = true;
+  $('answer').disabled = true;
+  $('btn-check').disabled = true;
+  $('btn-reveal').style.display = 'none';
+  $('btn-next').style.display = 'inline-block';
+  $('btn-summary').style.display = 'inline-block';
+  $('btn-next').focus();
+}
 
 async function loadSentence() {
   solved = false;
-  document.getElementById('answer').value = '';
-  document.getElementById('answer').disabled = false;
-  document.getElementById('btn-check').disabled = false;
-  document.getElementById('feedback').className = 'feedback';
-  document.getElementById('feedback').innerHTML = '';
-  document.getElementById('btn-next').style.display = 'none';
-  document.getElementById('btn-summary').style.display = 'none';
-  document.getElementById('source').textContent = '...';
+  $('answer').value = '';
+  $('answer').disabled = false;
+  $('btn-check').disabled = false;
+  $('feedback').className = 'feedback';
+  $('feedback').replaceChildren();
+  $('btn-next').style.display = 'none';
+  $('btn-summary').style.display = 'none';
+  $('btn-reveal').style.display = 'block';
+  $('source').textContent = '...';
 
   const res = await fetch('/api/sentence');
   const data = await res.json();
-  document.getElementById('source').textContent = data.source;
-  document.getElementById('answer').focus();
+  $('source').textContent = data.source;
+  $('answer').focus();
 }
 
 async function checkAnswer() {
   if (solved) return;
-  const answer = document.getElementById('answer').value.trim();
+  const answer = $('answer').value.trim();
   if (!answer) return;
 
   const res = await fetch('/api/check', {
@@ -1218,33 +1376,37 @@ async function checkAnswer() {
     body: JSON.stringify({answer})
   });
   const data = await res.json();
-  const fb = document.getElementById('feedback');
 
   if (data.correct) {
-    solved = true;
-    document.getElementById('answer').disabled = true;
-    document.getElementById('btn-check').disabled = true;
-    fb.className = 'feedback correct';
     const msg = data.first_try ? 'מעולה! צדקת מהניסיון הראשון!' : `צדקת אחרי ${data.attempts} ניסיונות.`;
-    fb.innerHTML = `<strong>${msg}</strong><br>התרגום: ${data.hebrew}`;
-    document.getElementById('btn-next').style.display = 'inline-block';
-    document.getElementById('btn-summary').style.display = 'inline-block';
+    showFeedback('correct', msg, ['התרגום: ' + data.hebrew], 'issue');
+    (data.notes || []).forEach(n => $('feedback').appendChild(el('span', 'note', n)));
+    finishSentence();
     await updateStats();
   } else {
-    fb.className = 'feedback wrong';
-    fb.innerHTML = '<strong>לא מדויק. מה שצריך לתקן:</strong><br>' +
-      data.issues.map(i => `<span class="issue">• ${i}</span>`).join('');
-    document.getElementById('answer').focus();
-    document.getElementById('answer').select();
+    showFeedback('wrong', 'לא מדויק. מה שצריך לתקן:', data.issues.map(i => '• ' + i));
+    $('answer').focus();
+    $('answer').select();
   }
+}
+
+async function revealAnswer() {
+  if (solved) return;
+  const res = await fetch('/api/reveal', {method: 'POST'});
+  const data = await res.json();
+  if (data.error) return;
+  showFeedback('revealed', 'התשובה:', [data.hebrew]);
+  finishSentence();
+  await updateStats();
 }
 
 async function updateStats() {
   const res = await fetch('/api/stats');
   const s = await res.json();
-  document.getElementById('s-first').textContent = s.first_try;
-  document.getElementById('s-corr').textContent = s.corrected;
-  document.getElementById('s-words').textContent = s.words;
+  $('s-first').textContent = s.first_try;
+  $('s-corr').textContent = s.corrected;
+  $('s-rev').textContent = s.revealed;
+  $('s-words').textContent = s.words;
 }
 
 function nextSentence() { loadSentence(); }
@@ -1252,24 +1414,30 @@ function nextSentence() { loadSentence(); }
 async function showSummary() {
   const res = await fetch('/api/stats');
   const s = await res.json();
-  document.getElementById('sum-total').textContent = s.first_try + s.corrected;
-  document.getElementById('sum-first').textContent = s.first_try;
-  document.getElementById('sum-corr').textContent = s.corrected;
-  document.getElementById('sum-words').textContent = s.words;
-  document.getElementById('overlay').classList.add('show');
+  $('sum-total').textContent = s.first_try + s.corrected + s.revealed;
+  $('sum-first').textContent = s.first_try;
+  $('sum-corr').textContent = s.corrected;
+  $('sum-rev').textContent = s.revealed;
+  $('sum-words').textContent = s.words;
+  $('overlay').classList.add('show');
 }
 
 async function restart() {
   await fetch('/api/reset');
-  document.getElementById('overlay').classList.remove('show');
-  document.getElementById('s-first').textContent = '0';
-  document.getElementById('s-corr').textContent = '0';
-  document.getElementById('s-words').textContent = '0';
+  $('overlay').classList.remove('show');
+  ['s-first', 's-corr', 's-rev', 's-words'].forEach(id => $(id).textContent = '0');
   loadSentence();
 }
 
-document.getElementById('answer').addEventListener('keydown', e => {
+$('answer').addEventListener('keydown', e => {
   if (e.key === 'Enter') checkAnswer();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && solved && document.activeElement !== $('answer')
+      && !$('overlay').classList.contains('show')) {
+    e.preventDefault();
+    loadSentence();
+  }
 });
 
 loadSentence();
@@ -1278,5 +1446,7 @@ loadSentence();
 </html>"""
 
 if __name__ == "__main__":
-    print("האפליקציה רצה על: http://localhost:5000")
-    app.run(debug=False, port=5000)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    print(f"האפליקציה רצה על: http://localhost:{port}")
+    app.run(debug=False, port=port)
