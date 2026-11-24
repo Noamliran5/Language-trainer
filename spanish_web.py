@@ -852,7 +852,7 @@ LANG_META = {
     "spanish":  {"label": "ספרדית",  "flag": "🇪🇸", "source_label": "המשפט בספרדית",   "dir": "ltr"},
     "english":  {"label": "אנגלית",  "flag": "🇬🇧", "source_label": "המשפט באנגלית",   "dir": "ltr"},
     "romanian": {"label": "רומנית",  "flag": "🇷🇴", "source_label": "המשפט ברומנית",   "dir": "ltr"},
-    "arabic":   {"label": "ערבית",   "flag": "🇸🇦", "source_label": "המשפט בערבית",    "dir": "rtl"},
+    "arabic":   {"label": "ערבית",   "flag": "", "badge": "ع", "source_label": "המשפט בערבית",    "dir": "rtl"},
 }
 
 
@@ -1115,6 +1115,14 @@ h1{font-size:1.8rem;color:#fff;margin-bottom:8px}
   box-shadow:0 8px 32px rgba(233,69,96,0.15);
 }
 .flag{font-size:3rem;line-height:1}
+.letter-badge{
+  display:flex;align-items:center;justify-content:center;
+  width:3.2rem;height:3.2rem;border-radius:50%;
+  background:linear-gradient(135deg,#6a4cff,#e94560);
+  color:#fff;font-size:1.9rem;font-weight:700;
+  font-family:'Geeza Pro','Noto Naskh Arabic','Segoe UI',Arial,sans-serif;
+  padding-bottom:.25rem;
+}
 .lang-name{font-size:1.25rem;font-weight:700;color:#fff}
 .lang-sub{font-size:.78rem;color:#888}
 </style>
@@ -1140,7 +1148,7 @@ h1{font-size:1.8rem;color:#fff;margin-bottom:8px}
       <span class="lang-sub">Română</span>
     </a>
     <a class="lang-btn" href="/select/arabic">
-      <span class="flag">🇸🇦</span>
+      <span class="flag letter-badge">ع</span>
       <span class="lang-name">ערבית</span>
       <span class="lang-sub">العربية</span>
     </a>
@@ -1173,7 +1181,14 @@ body{
   max-width:580px;width:100%;color:#e0e0e0;
 }
 .top-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-h1{font-size:1.5rem;color:#e94560}
+h1{font-size:1.5rem;color:#e94560;display:flex;align-items:center;gap:8px}
+.badge-sm{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:1.9rem;height:1.9rem;border-radius:50%;
+  background:linear-gradient(135deg,#6a4cff,#e94560);
+  color:#fff;font-size:1.1rem;font-weight:700;padding-bottom:.15rem;
+  font-family:'Geeza Pro','Noto Naskh Arabic','Segoe UI',Arial,sans-serif;
+}
 .change-lang{
   font-size:.78rem;color:#888;text-decoration:none;
   border:1px solid rgba(255,255,255,0.12);border-radius:8px;
@@ -1275,7 +1290,7 @@ button:disabled{background:#555;cursor:default}
 <body>
 <div class="card">
   <div class="top-row">
-    <h1>{{ meta.flag }} אימון {{ meta.label }}</h1>
+    <h1>{% if meta.badge %}<span class="badge-sm">{{ meta.badge }}</span>{% else %}{{ meta.flag }}{% endif %} אימון {{ meta.label }}</h1>
     <a class="change-lang" href="/">החלף שפה</a>
   </div>
   <p class="subtitle">תרגם את המשפט מ{{ meta.label }} לעברית</p>
